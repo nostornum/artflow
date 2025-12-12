@@ -1,3 +1,7 @@
+# Project ignored files
+data/
+ckpt/
+
 # Visual Studio Code
 .kilocode/
 .continue/
