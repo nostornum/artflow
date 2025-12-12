@@ -1,0 +1,63 @@
+[project]
+name = "app"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "gitlint>=0.19.1",
+    "ipykernel>=7.1.0",
+    "ipywidgets>=8.1.8",
+    "pre-commit>=4.5.0",
+    "pyright>=1.1.407",
+]
+
+[tool.uv.sources]
+artflow = { workspace = true }
+torch = { index = "torch-cuda" }
+torchvision = { index = "torch-cuda" }
+nvidia-dali-cuda130 = { index = "dali-cuda" }
+
+[tool.uv.workspace]
+members = ["artflow"]
+
+[[tool.uv.index]]
+explicit = true
+name = "torch-cuda"
+url = "https://download.pytorch.org/whl/cu130"
+
+[[tool.uv.index]]
+explicit = true
+name = "dali-cuda"
+url = "https://developer.download.nvidia.com/compute/redist/"
+
+[tool.ruff]
+indent-width = 4
+line-length = 300
+include = ["pyproject.toml", "*.py", "*.ipynb"]
+
+[tool.ruff.lint]
+extend-select = ["ICN", "I"]
+extend-fixable = ["ICN", "I"]
+
+[tool.ruff.format]
+line-ending = "lf"
+quote-style = "double"
+indent-style = "space"
+
+[tool.ruff.lint.isort]
+order-by-type = true
+lines-between-types = 1
+lines-after-imports = 2
+force-wrap-aliases = true
+known-local-folder = ["flow_*"]
+
+[tool.ruff.lint.flake8-import-conventions.extend-aliases]
+"torchvision.transforms.v2.functional" = "TF"
+"torch.nn.functional" = "F"
+"numpy.typing" = "npt"
+
+[tool.pyright]
+venvPath = "."
+venv = ".venv"
