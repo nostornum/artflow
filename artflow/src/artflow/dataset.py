@@ -3,9 +3,11 @@ import os
 from pathlib import Path
 from typing import Any, Callable, Dict
 
+import kornia_rs as K
 import polars as pl
-import torchvision as TV
+import torch
 
+from numpy.typing import NDArray
 from polars import DataFrame, LazyFrame
 from torch import Tensor
 from torch.utils.data import Dataset
@@ -39,8 +41,10 @@ class DanbooruDataset(Dataset):
 
     def __getitem__(self, index: int) -> Dict[str, Any]:
         row: Dict[str, Any] = self.data.row(index, named=True)
-        image: Tensor = TV.io.read_file(str(self.path / f"{row['path']}"))
-        return {"caption": row["caption"], "image": image, "score": row["score"], "dim": (row["bh"], row["bw"])}
+        image: NDArray = K.read_image_jpeg(str(self.path / f"{row['path']}"), "rgb")  # type: ignore
+        image: NDArray = K.resize(image, (row["bh"], row["bw"]), interpolation="nearest")  # type: ignore
+        image: Tensor = torch.from_dlpack(image).permute((2, 0, 1))  # type: ignore
+        return {"caption": row["caption"], "image": image, "score": row["score"]}
 
     def __len__(self) -> int:
         return len(self.data)

@@ -9,6 +9,7 @@ dependencies = [
     "accelerate>=1.12.0",
     "einops>=0.8.1",
     "einx[torch]>=0.3.0",
+    "kornia-rs>=0.1.10",
     "matplotlib>=3.10.8",
     "msgspec>=0.20.0",
     "nvidia-dali-cuda130>=1.52.0",

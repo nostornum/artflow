@@ -56,6 +56,8 @@ class RandomBucketSampler(Sampler[List[int]]):
         self._b_idx: Dict[int, Tensor] = {bucket: torch.tensor(content) for bucket, content in self._bkt.select(["bucket", "bucket_content"]).iter_rows()}
         self._w_frq: Tensor = torch.tensor(pl.Series(self._bkt.select("bucket_size")).to_list(), dtype=torch.float32)
         self._w_uni: Tensor = torch.ones(self._w_frq.size(0))
+        print(self.data.describe())
+        print(self._b_idx)
 
     def __iter__(self) -> Iterator[List[int]]:
         for _ in range(self.num_samples):

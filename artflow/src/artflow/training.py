@@ -1,8 +1,4 @@
-import math
-
-import matplotlib.pyplot as plt
 import torch
-import torchvision as TV
 
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -10,7 +6,6 @@ from tqdm import tqdm
 from .args import Args
 from .bucket import AspectRatioPartition, RandomBucketSampler
 from .dataset import DanbooruDataset
-from .utils import collate_fn
 
 
 def train(args: Args) -> None:
@@ -39,12 +34,9 @@ def train(args: Args) -> None:
     loader: DataLoader = DataLoader(
         num_workers=args.dataset.num_workers,
         batch_sampler=sampler,
-        collate_fn=collate_fn,
         dataset=dataset,
+        pin_memory=True,
     )
 
     for batch in tqdm(loader):
-        for i, caption in enumerate(batch["captions"]):
-            print(f"{i}: {caption}")
-        plt.imshow(TV.utils.make_grid(batch["images"].cpu(), nrow=math.floor(math.sqrt(batch["images"].size(0)))).permute((1, 2, 0)))
-        plt.show()
+        pass
