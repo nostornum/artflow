@@ -1,0 +1,70 @@
+from dataclasses import KW_ONLY, dataclass
+from typing import Dict, Iterator, List, Literal, Tuple
+
+import polars as pl
+import torch
+
+from polars import DataFrame, LazyFrame
+from torch import Generator, Tensor
+from torch.utils.data import Sampler
+
+
+@dataclass
+class AspectRatioPartition:
+    buckets: List[Tuple[int, int]]
+    asp_dis: float
+    min_res: float
+    max_res: float
+
+    def __call__(self, data: DataFrame) -> DataFrame:
+        buckets: LazyFrame = (
+            LazyFrame(
+                {
+                    "bh": [h for h, _ in self.buckets],
+                    "bw": [w for _, w in self.buckets],
+                }
+            )
+            .with_columns(ar=pl.col.bw.truediv(pl.col.bh))
+            .with_row_index("bucket")
+            .sort(by="ar")
+        )
+
+        query: LazyFrame = data.lazy()
+        query = query.filter(pl.min_horizontal("h", "w") >= self.min_res)
+        query = query.filter(pl.max_horizontal("h", "w") <= self.max_res)
+        query = query.with_columns(ar=pl.col.w.truediv(pl.col.h))
+        query = query.sort(by=pl.col.ar)
+        query = query.join_asof(buckets, on="ar", strategy="nearest", tolerance=self.asp_dis, coalesce=True)
+        query = query.filter(~pl.col.bucket.is_null()).drop("index", strict=False).with_row_index("index")
+        return query.collect()
+
+
+@dataclass
+class RandomBucketSampler(Sampler[List[int]]):
+    data: DataFrame
+    _: KW_ONLY
+    seed: int = 42
+    batch_size: int = 1
+    num_samples: int = 0
+    sampling: Literal["U", "F"] = "U"
+
+    def __post_init__(self) -> None:
+        assert len(self.data) != 0, "input 'data' cannot be empty"
+        assert self.data.get_column("bucket", default=None) is not None, "input 'data' must have 'bucket' column"
+        self._rng: Generator = Generator().manual_seed(self.seed)
+        self._bkt: DataFrame = self.data.lazy().filter(pl.col("bucket") != -1).group_by("bucket").agg(pl.len().alias("bucket_size"), pl.col("index").alias("bucket_content")).sort(by="bucket_size", descending=True).collect()
+        self._b_idx: Dict[int, Tensor] = {bucket: torch.tensor(content) for bucket, content in self._bkt.select(["bucket", "bucket_content"]).iter_rows()}
+        self._w_frq: Tensor = torch.tensor(pl.Series(self._bkt.select("bucket_size")).to_list(), dtype=torch.float32)
+        self._w_uni: Tensor = torch.ones(self._w_frq.size(0))
+
+    def __iter__(self) -> Iterator[List[int]]:
+        for _ in range(self.num_samples):
+            w_bkt: Tensor = self._w_frq if self.sampling == "F" else self._w_uni
+            i_bkt: Tensor = torch.multinomial(w_bkt, num_samples=1, generator=self._rng)
+            b_idx: Tensor = self._b_idx[int(i_bkt)]
+            s_idx: Tensor = torch.randint(0, b_idx.nelement(), [self.batch_size], generator=self._rng)
+            s_idx: Tensor = b_idx[s_idx]
+            yield s_idx.tolist()
+
+    def __len__(self) -> int:
+        return self.num_samples

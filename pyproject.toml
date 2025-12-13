@@ -10,6 +10,7 @@ dev = [
     "ipykernel>=7.1.0",
     "ipywidgets>=8.1.8",
     "pre-commit>=4.5.0",
+    "pyqt6>=6.10.1",
     "pyright>=1.1.407",
 ]
 
@@ -30,7 +31,7 @@ url = "https://download.pytorch.org/whl/cu130"
 [[tool.uv.index]]
 explicit = true
 name = "dali-cuda"
-url = "https://developer.download.nvidia.com/compute/redist/"
+url = "https://developer.download.nvidia.com/compute/redist"
 
 [tool.ruff]
 indent-width = 4
@@ -59,5 +60,6 @@ known-local-folder = ["flow_*"]
 "numpy.typing" = "npt"
 
 [tool.pyright]
+include = ['artflow/**']
 venvPath = "."
 venv = ".venv"
