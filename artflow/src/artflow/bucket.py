@@ -1,12 +1,15 @@
 from dataclasses import KW_ONLY, dataclass
-from typing import Dict, Iterator, List, Literal, Tuple
+from typing import Any, Dict, Iterator, List, Literal, Tuple
 
 import polars as pl
 import torch
+import torchvision.transforms.v2 as T
 
+from PIL.Image import Image
 from polars import DataFrame, LazyFrame
 from torch import Generator, Tensor
 from torch.utils.data import Sampler
+from torchvision.transforms.v2 import InterpolationMode
 
 
 @dataclass
@@ -46,7 +49,7 @@ class RandomBucketSampler(Sampler[List[int]]):
     seed: int = 42
     batch_size: int = 1
     num_samples: int = 0
-    sampling: Literal["U", "F"] = "U"
+    sampling: Literal["U", "F"] = "F"
 
     def __post_init__(self) -> None:
         assert len(self.data) != 0, "input 'data' cannot be empty"
@@ -56,13 +59,13 @@ class RandomBucketSampler(Sampler[List[int]]):
         self._b_idx: Dict[int, Tensor] = {bucket: torch.tensor(content) for bucket, content in self._bkt.select(["bucket", "bucket_content"]).iter_rows()}
         self._w_frq: Tensor = torch.tensor(pl.Series(self._bkt.select("bucket_size")).to_list(), dtype=torch.float32)
         self._w_uni: Tensor = torch.ones(self._w_frq.size(0))
-        print(self.data.describe())
-        print(self._b_idx)
+        self._w_bkt: Tensor = self._w_frq if self.sampling == "F" else self._w_uni
+        self._w_bkt: Tensor = self._w_bkt / self._w_bkt.sum()
+        print(self._bkt)
 
     def __iter__(self) -> Iterator[List[int]]:
         for _ in range(self.num_samples):
-            w_bkt: Tensor = self._w_frq if self.sampling == "F" else self._w_uni
-            i_bkt: Tensor = torch.multinomial(w_bkt, num_samples=1, generator=self._rng)
+            i_bkt: Tensor = torch.multinomial(self._w_bkt, num_samples=1, generator=self._rng)
             b_idx: Tensor = self._b_idx[int(i_bkt)]
             s_idx: Tensor = torch.randint(0, b_idx.nelement(), [self.batch_size], generator=self._rng)
             s_idx: Tensor = b_idx[s_idx]
@@ -70,3 +73,22 @@ class RandomBucketSampler(Sampler[List[int]]):
 
     def __len__(self) -> int:
         return self.num_samples
+
+    def state_dict(self) -> Dict[str, Tensor]:
+        return {"batch_sampler": self._rng.get_state()}
+
+    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+        self._rng.set_state(state_dict["batch_sampler"])
+
+
+@dataclass
+class BucketTransform:
+    def __post_init__(self) -> None:
+        self._transforms: Dict[Tuple[int, int], T.Transform] = {}
+
+    def __call__(self, x: Image, size: Tuple[int, int]) -> Tensor:
+        return self._transforms[size](x) if size in self._transforms else self._transforms.setdefault(size, BucketTransform.create(size))(x)
+
+    @staticmethod
+    def create(size: Tuple[int, int]) -> T.Transform:
+        return T.Compose([T.Resize(min(size), InterpolationMode.LANCZOS), T.RandomCrop(size, pad_if_needed=True, padding_mode="reflect"), T.ToImage(), T.ToDtype(dtype=torch.float32, scale=True)])

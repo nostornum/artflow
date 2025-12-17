@@ -413,42 +413,36 @@ class DeCo(nn.Module):
         patch_size: int = 32,
         num_heads: int = 8,
         dim_input: int = 384,
-        dim_hidden_e: int = 768,
-        dim_hidden_d: int = 768,
+        dim_hidden_enc: int = 768,
+        dim_hidden_dec: int = 768,
         dim_timestep: int = 256,
         dim_size: int = 256,
-        dim_txt_seqs: int = 1024,
-        max_text_tok: int = 128,
+        dim_txt_emb: int = 1024,
         num_embedder_layers: int = 4,
         num_encoder_layers: int = 16,
         num_decoder_layers: int = 2,
         mlp_ratio_txt: float = 4.0,
         mlp_ratio_enc: float = 4.0,
-        cond_drop: float = 0.1,
     ) -> None:
         super().__init__()
 
         self.patch_size: int = patch_size
-        self.dim_hidden: int = dim_hidden_e
+        self.dim_hidden: int = dim_hidden_enc
         self.dim_size_i: int = dim_size // 2
-        self.dim_head_e: int = dim_hidden_e // num_heads
-
-        self.cond_drop: float = cond_drop
-        self.null_embed = nn.Parameter(torch.randn(1, 1, dim_hidden_e))
-        self.text_embed = nn.Parameter(torch.randn(1, max_text_tok, dim_hidden_e))
+        self.dim_head_e: int = dim_hidden_enc // num_heads
 
         self.b_h_embedder = TimestepEmbedder(dim_freq=self.dim_size_i, dim_hidden=self.dim_size_i)
         self.b_w_embedder = TimestepEmbedder(dim_freq=self.dim_size_i, dim_hidden=self.dim_size_i)
-        self.s_embedder = nn.Linear(self.dim_size_i * 2, dim_hidden_e)
+        self.s_embedder = nn.Linear(self.dim_size_i * 2, dim_hidden_enc)
 
-        self.t_embedder = TimestepEmbedder(dim_freq=dim_timestep, dim_hidden=dim_hidden_e)
-        self.c_embedder = Embed(dim_input=dim_txt_seqs, dim_embed=dim_hidden_e, norm="RMSNorm")
-        self.p_embedder = PatchEmbed(dim_input=dim_input, dim_embed=dim_hidden_e, patch_size=patch_size)
-        self.x_embedder = NerfEmbedder(dim_input=dim_input, dim_hidden=dim_hidden_d, max_freq=8)
+        self.t_embedder = TimestepEmbedder(dim_freq=dim_timestep, dim_hidden=dim_hidden_enc)
+        self.c_embedder = Embed(dim_input=dim_txt_emb, dim_embed=dim_hidden_enc, norm="RMSNorm")
+        self.p_embedder = PatchEmbed(dim_input=dim_input, dim_embed=dim_hidden_enc, patch_size=patch_size)
+        self.x_embedder = NerfEmbedder(dim_input=dim_input, dim_hidden=dim_hidden_dec, max_freq=8)
 
-        self.embedder = nn.ModuleList([TextRefineBlock(dim_hidden_e, num_heads, mlp_ratio_txt) for _ in range(num_embedder_layers)])
-        self.encoder = nn.ModuleList([DitCrossBlock(dim_hidden_e, num_heads, mlp_ratio_enc) for _ in range(num_encoder_layers)])
-        self.decoder = PIXHead(dim_input=dim_hidden_d, dim_hidden=dim_hidden_d, dim_condt=dim_hidden_e, dim_output=dim_input, num_res_blocks=num_decoder_layers, patch_size=patch_size)
+        self.embedder = nn.ModuleList([TextRefineBlock(dim_hidden_enc, num_heads, mlp_ratio_txt) for _ in range(num_embedder_layers)])
+        self.encoder = nn.ModuleList([DitCrossBlock(dim_hidden_enc, num_heads, mlp_ratio_enc) for _ in range(num_encoder_layers)])
+        self.decoder = PIXHead(dim_input=dim_hidden_dec, dim_hidden=dim_hidden_dec, dim_condt=dim_hidden_enc, dim_output=dim_input, num_res_blocks=num_decoder_layers, patch_size=patch_size)
         self.init_weights()
 
     def init_weights(self) -> None:
@@ -477,7 +471,7 @@ class DeCo(nn.Module):
     def fetch_pos(self, h: int, w: int, device: torch.device) -> Tensor:
         return self.posdict.setdefault((h, w), precompute_freqs_cis_2d(self.dim_head_e, h, w)).to(device) if (h, w) not in self.posdict else self.posdict[(h, w)].to(device)
 
-    def forward(self, x: Tensor, t: Tensor, c: Tensor, c_drop: Tensor | None = None) -> Tensor:
+    def forward(self, x: Tensor, t: Tensor, c: Tensor) -> Tensor:
         B, C, H, W = x.size()
         P: int = self.patch_size
         E_Y: int = H // P
@@ -499,9 +493,6 @@ class DeCo(nn.Module):
 
         # Text embedding
         c_s: Tensor = self.c_embedder(c)
-        c_d: Tensor | None = torch.rand(B, device=c_s.device) < self.cond_drop if c_drop is None and (self.training and self.cond_drop > 0.0) else c_drop
-        c_s: Tensor = torch.where(c_d.view(B, 1, 1), self.null_embed, c_s) if c_d is not None else c_s
-        c_s: Tensor = c_s + self.text_embed
 
         # Text refinement
         for layer in self.embedder:

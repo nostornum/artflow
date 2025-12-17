@@ -1,2 +1,4 @@
-def main() -> None:
-    print("Hello from artflow!")
+from dotenv import load_dotenv
+
+
+load_dotenv()

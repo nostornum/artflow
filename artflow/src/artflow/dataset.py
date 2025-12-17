@@ -1,13 +1,13 @@
 import os
 
 from pathlib import Path
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, Tuple
 
-import kornia_rs as K
+import PIL
+import PIL.Image
 import polars as pl
-import torch
 
-from numpy.typing import NDArray
+from PIL.Image import Image
 from polars import DataFrame, LazyFrame
 from torch import Tensor
 from torch.utils.data import Dataset
@@ -16,11 +16,12 @@ from torch.utils.data import Dataset
 class DanbooruDataset(Dataset):
     "Danbooru 2024 Dataset (https://huggingface.co/datasets/deepghs/danbooru2024-webp-4Mpixel)"
 
-    def __init__(self, path: str, partition: Callable[[DataFrame], DataFrame]) -> None:
+    def __init__(self, path: str, partition: Callable[[DataFrame], DataFrame], transform: Callable[[Image, Tuple[int, int]], Tensor]) -> None:
         super().__init__()
         self.path: Path = Path(path, "raw")
         self.data: DataFrame = self.__makedata()
         self.data: DataFrame = partition(self.data)
+        self.transform: Callable[[Image, Tuple[int, int]], Tensor] = transform
 
     def __makedata(self) -> DataFrame:
         path_label: Path = self.path / "labels.parquet"
@@ -41,10 +42,10 @@ class DanbooruDataset(Dataset):
 
     def __getitem__(self, index: int) -> Dict[str, Any]:
         row: Dict[str, Any] = self.data.row(index, named=True)
-        image: NDArray = K.read_image_jpeg(str(self.path / f"{row['path']}"), "rgb")  # type: ignore
-        image: NDArray = K.resize(image, (row["bh"], row["bw"]), interpolation="nearest")  # type: ignore
-        image: Tensor = torch.from_dlpack(image).permute((2, 0, 1))  # type: ignore
-        return {"caption": row["caption"], "image": image, "score": row["score"]}
+        img_p: str = str(self.path / f"{row['path']}")
+        img_r: Image = PIL.Image.open(img_p).convert("RGB")
+        img_b: Tensor = self.transform(img_r, (row["bh"], row["bw"]))
+        return {"caption": row["caption"], "image": img_b, "score": row["score"]}
 
     def __len__(self) -> int:
         return len(self.data)

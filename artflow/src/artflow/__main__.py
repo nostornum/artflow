@@ -1,6 +1,6 @@
 import tyro
 
-from .training import train
+from artflow.training import train
 
 
 tyro.cli(train)
