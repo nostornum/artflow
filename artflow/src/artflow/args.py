@@ -95,7 +95,7 @@ class OptimizerArgs(Struct, kw_only=True):
     """Arguments for Muon optimizer"""
 
     # Learning rate
-    lr: float = 2e-3
+    lr: float = 1e-3
 
     # Number of warmup steps
     warmup: int = 1000
@@ -112,6 +112,9 @@ class TrainArgs(Struct, kw_only=True):
 
     # Probability to drop text condition
     cond_drop: float = 0.1
+
+    # Gradient accumulation steps
+    grad_accumulation_steps: int = 1
 
     # Perform gradient clipping
     clip_grad: float = 1.0

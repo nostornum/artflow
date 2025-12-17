@@ -35,26 +35,26 @@ from .utils import flatten, makegrid, normalize, num_params, read_prompts, set_s
 @dataclass
 class Trainer:
     _: KW_ONLY
+    accelerator: Accelerator
     vae: AutoencoderKLFlux2
     llm: Gemma3ForCausalLM
     tok: GemmaTokenizer
-    acc: Accelerator
     sch: LRScheduler
     opt: Optimizer
+    model: DeCo
     args: Args
-    dif: DeCo
 
     def __post_init__(self) -> None:
         self.vae.requires_grad_(False)
         self.vae.eval()
         self.llm.requires_grad_(False)
         self.llm.eval()
-        self.dif.requires_grad_(True)
-        self.dif.train()
+        self.model.requires_grad_(True)
+        self.model.train()
 
     def text_encode(self, caption: List[str]) -> Tensor:
         text_enc: BatchEncoding = self.tok(text=caption, max_length=self.args.llm.max_length, truncation=True, padding="max_length", padding_side="right", return_tensors="pt")
-        text_ids: Dict[str, Tensor] = {k: v.to(self.acc.device) for k, v in text_enc.items()}["input_ids"]
+        text_ids: Dict[str, Tensor] = {k: v.to(self.accelerator.device) for k, v in text_enc.items()}["input_ids"]
         text_emb = self.llm(input_ids=text_ids, output_hidden_states=True)["hidden_states"]
         return text_emb[-1].float()
 
@@ -73,15 +73,13 @@ class Trainer:
         return s * t / (1 + (s - 1) * t)
 
     def step(self, batch: Dict[str, Any], c_null: Tensor) -> Dict[str, Tensor]:
-        self.opt.zero_grad()
+        self.opt.zero_grad(set_to_none=True)
 
         with torch.no_grad():
             # Encode inputs
             B: int = batch["image"].size(0)
             x: Tensor = self.imgs_encode(batch["image"] * 2 - 1)
-
-            cap = shuffle(batch["caption"])
-            c: Tensor = self.text_encode(cap)
+            c: Tensor = self.text_encode(shuffle(batch["caption"]))
 
             # Drop condition for CFG
             mask: Tensor = torch.rand(B, device=x.device) < self.args.train.cond_drop
@@ -89,7 +87,7 @@ class Trainer:
 
             # Sample timestep
             e: Tensor = torch.randn_like(x)
-            t: Tensor = torch.rand([B, 1, 1, 1], device=self.acc.device)
+            t: Tensor = torch.rand([B, 1, 1, 1], device=self.accelerator.device)
             t: Tensor = self.shift_time(x, t)
 
             # Compute target
@@ -97,22 +95,23 @@ class Trainer:
             x_t: Tensor = t * x + (1 - t) * e
             v_t: Tensor = (x_g - x_t) / (1 - t).clamp_min(0.05)
 
-        # Perform x-pred and compute v-loss
-        x_p: Tensor = self.dif.forward(x=x_t, t=t, c=c)
-        v_p: Tensor = (x_p - x_t) / (1 - t).clamp_min(0.05)
-        v_m: Tensor = F.mse_loss(v_p, v_t)
+        with self.accelerator.accumulate(self.model):
+            # Perform x-pred and compute v-loss
+            x_p: Tensor = self.model.forward(x=x_t, t=t, c=c)
+            v_p: Tensor = (x_p - x_t) / (1 - t).clamp_min(0.05)
+            v_m: Tensor = F.mse_loss(v_p, v_t)
 
-        # Compute v-cfm
-        v_c: Tensor = -F.mse_loss(v_p, v_t.roll(1, 0))
+            # Compute v-cfm
+            v_c: Tensor = -F.mse_loss(v_p, v_t.roll(1, 0))
 
-        # Total Loss
-        loss: Tensor = v_m + self.args.train.w_cfm * v_c
+            # Total Loss
+            loss: Tensor = v_m + self.args.train.w_cfm * v_c
 
-        # Backprop
-        self.acc.backward(loss=loss)
-        self.acc.clip_grad_norm_(self.dif.parameters(), self.args.train.clip_grad)
-        self.opt.step()
-        self.sch.step()
+            # Backprop
+            self.accelerator.backward(loss=loss)
+            self.accelerator.clip_grad_norm_(self.model.parameters(), self.args.train.clip_grad)
+            self.opt.step()
+            self.sch.step()
 
         return {
             "loss": loss.detach(),
@@ -124,7 +123,7 @@ class Trainer:
 
     @torch.no_grad()
     def sample(self, eps: Tensor, c_cond: Tensor, c_null: Tensor) -> Tensor:
-        t: Tensor = torch.linspace(0, 1, steps=self.args.sample.timesteps + 1, device=self.acc.device)
+        t: Tensor = torch.linspace(0, 1, steps=self.args.sample.timesteps + 1, device=self.accelerator.device)
         t: Tensor = self.shift_time(eps, t)
         w: float = self.args.sample.w
         B: int = eps.size(0)
@@ -132,8 +131,8 @@ class Trainer:
 
         for t_curr, t_next in zip(t, t[1:]):
             t_curr: Tensor = t_curr.expand(B, 1, 1, 1)
-            x_con: Tensor = self.dif.forward(x, t_curr, c_cond)
-            x_unc: Tensor = self.dif.forward(x, t_curr, c_null)
+            x_con: Tensor = self.model.forward(x, t_curr, c_cond)
+            x_unc: Tensor = self.model.forward(x, t_curr, c_null)
             v_con: Tensor = (x_con - x) / (1 - t_curr).clamp_min(0.05)
             v_unc: Tensor = (x_unc - x) / (1 - t_curr).clamp_min(0.05)
             v_cfg: Tensor = v_unc + w * (v_con - v_unc)
@@ -206,16 +205,16 @@ def train(args: Args) -> None:
         pretrained_model_name_or_path=args.llm.ckpt,
         token=os.environ["HF_TOKEN"],
     )
-    dif: DeCo = DeCo(**asdict(args.model))
+    model: DeCo = DeCo(**asdict(args.model))
 
     # Model parameters count
-    print("Params: ", num_params(dif))
+    print("Params: ", num_params(model))
 
     # Setup accelerator
-    opt: Optimizer = Muon(dif.parameters(), args.train.optim.lr)
-    acc: Accelerator = Accelerator(mixed_precision="bf16", log_with="wandb")
+    opt: Optimizer = Muon(model.parameters(), args.train.optim.lr)
     sch: LRScheduler = CosineScheduler(opt, args.train.optim.warmup, args.train.steps)
-    loader, llm, vae, dif, opt, sch = acc.prepare(loader, llm, vae, dif, opt, sch)
+    accelerator: Accelerator = Accelerator(mixed_precision="bf16", log_with="wandb", gradient_accumulation_steps=args.train.grad_accumulation_steps)
+    loader, llm, vae, model, opt, sch = accelerator.prepare(loader, llm, vae, model, opt, sch)
 
     # Setup experiment
     run_args: Dict[str, Any] = dict(
@@ -225,24 +224,24 @@ def train(args: Args) -> None:
     )
 
     # Unwrap models
-    vae = cast(AutoencoderKLFlux2, vae.module if acc.num_processes != 1 else vae)
-    llm = cast(Gemma3ForCausalLM, llm.module if acc.num_processes != 1 else llm)
-    dif = cast(DeCo, dif)
+    vae = cast(AutoencoderKLFlux2, vae.module if accelerator.num_processes != 1 else vae)
+    llm = cast(Gemma3ForCausalLM, llm.module if accelerator.num_processes != 1 else llm)
+    model = cast(DeCo, model)
 
     # Resume from checkpoint
-    step: int = Trainer.load(os.path.join(args.train.ckpt_folder, args.train.ckpt_resume), loader, acc, dif, opt, sch) if args.train.ckpt_resume else 0
+    step: int = Trainer.load(os.path.join(args.train.ckpt_folder, args.train.ckpt_resume), loader, accelerator, model, opt, sch) if args.train.ckpt_resume else 0
 
     # Initialize experiment
-    acc.init_trackers(args.track.project, config=flatten(normalize((args))), init_kwargs=run_args)
+    accelerator.init_trackers(args.track.project, config=flatten(normalize((args))), init_kwargs=run_args)
 
     # Initialize trainer
     trainer = Trainer(
+        accelerator=accelerator,
+        model=model,
         args=args,
         vae=vae,
         llm=llm,
         tok=tok,
-        dif=dif,
-        acc=acc,
         opt=opt,
         sch=sch,
     )
@@ -253,20 +252,20 @@ def train(args: Args) -> None:
         c_unc: Tensor = trainer.text_encode([""])
 
     # Training
-    for batch in tqdm(loader, initial=step, disable=not acc.is_main_process):
+    for batch in tqdm(loader, disable=not accelerator.is_main_process):
         out: Dict[str, Tensor] = trainer.step(batch, c_unc)
 
         if step % args.track.ckpt_every == 0:
-            Trainer.save(args.train.ckpt_folder, loader, acc, dif, opt, sch, step)
+            Trainer.save(args.train.ckpt_folder, loader, accelerator, model, opt, sch, step)
 
         if step % args.track.loss_every == 0:
-            acc.log({"train/loss": out["loss"].cpu().item()}, step)
-            acc.log({"train/cfm": out["cfm"].cpu().item()}, step)
-            acc.log({"train/l2": out["mse"].cpu().item()}, step)
-            acc.log({"train/lr": sch.get_last_lr()[0]}, step)
+            accelerator.log({"train/loss": out["loss"].cpu().item()}, step)
+            accelerator.log({"train/cfm": out["cfm"].cpu().item()}, step)
+            accelerator.log({"train/l2": out["mse"].cpu().item()}, step)
+            accelerator.log({"train/lr": sch.get_last_lr()[0]}, step)
 
         if step % args.track.eval_every == 0:
-            dif.eval()
+            model.eval()
 
             # Use subset
             x_rgb: Tensor = batch["image"][: args.sample.batch].cpu()
@@ -275,18 +274,18 @@ def train(args: Args) -> None:
 
             # Sample using entries
             x_out: Tensor = trainer.sample(eps=torch.randn_like(x_eps), c_cond=b_emb, c_null=c_unc).cpu()
-            acc.log({"eval/sample": (m := makegrid(x_out))}, step)
+            accelerator.log({"eval/sample": (m := makegrid(x_out))}, step)
             plt.close(m)
 
             # Sample using prompts
             x_out: Tensor = trainer.sample(eps=torch.randn_like(x_eps), c_cond=c_emb, c_null=c_unc).cpu()
-            acc.log({"eval/prompt": (m := makegrid(x_out))}, step)
+            accelerator.log({"eval/prompt": (m := makegrid(x_out))}, step)
             plt.close(m)
 
             # Send inputs
-            acc.log({"eval/inputs": (m := makegrid(x_rgb))}, step)
+            accelerator.log({"eval/inputs": (m := makegrid(x_rgb))}, step)
             plt.close(m)
 
-            dif.train()
+            model.train()
 
         step += 1
