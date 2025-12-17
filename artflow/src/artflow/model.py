@@ -1,5 +1,7 @@
 import math
 
+from abc import ABC, abstractmethod
+from functools import cache
 from typing import Dict, Literal, Tuple, cast
 
 import einops
@@ -10,6 +12,14 @@ import torch.nn.functional as F
 
 from torch import Tensor
 from torch.nn.functional import scaled_dot_product_attention as attention
+
+
+@cache
+def div(n: int, m: int) -> int:
+    for d in range(m, n + 1):
+        if n % d == 0:
+            return d
+    return n
 
 
 def basic_init(module: nn.Module) -> None:
@@ -59,6 +69,192 @@ def apply_rotary_emb_cross(xq: torch.Tensor, xk: torch.Tensor, freq_cis: torch.T
     xq_out = torch.view_as_real(xq_ * freq_cis).flatten(3)
     xk_out = torch.view_as_real(xk_ * freq_cis).flatten(3)
     return xq_out.type_as(xq), xk_out.type_as(xk)
+
+
+class Router(nn.Module, ABC):
+    Kind = Literal["PASS", "TREAD", "SPRINT"]
+
+    def __init__(
+        self,
+        *,
+        depth_init: int,
+        depth_term: int,
+        rate: float,
+        **kwargs,
+    ) -> None:
+        super().__init__()
+        self.depth_init: int = depth_init
+        self.depth_term: int = depth_term
+        self.rate: float = rate
+
+    @abstractmethod
+    def mask(self, *, x: Tensor, h: int, w: int) -> Tensor:
+        # x: [B, S, D] -> m: [B, S]
+        raise NotImplementedError()
+
+    @abstractmethod
+    def drop(self, *, x: Tensor, m: Tensor) -> Tensor:
+        # x: [B, S0, D], m: [B, S1, D] -> x': [B, S1, D]
+        raise NotImplementedError()
+
+    @abstractmethod
+    def fuse(self, *, x: Tensor, m: Tensor, x_k: Tensor) -> Tensor:
+        # x: [B, S1, D], m: [B, S1, D], x_o: [B, S0, D] -> x': [B, S0, D]
+        raise NotImplementedError()
+
+    @classmethod
+    def create(cls, kind: Kind, **kwargs) -> "Router":
+        match kind:
+            case "PASS":
+                return PASSRouter(**kwargs)
+            case "TREAD":
+                return TREADRouter(**kwargs)
+            case "SPRINT":
+                return SPRINTRouter(**kwargs)
+
+
+class PASSRouter(Router):
+    """
+    PASS: Router that just passes its' input to the output
+    """
+
+    def __init__(
+        self,
+        *,
+        depth_init: int = 2,
+        depth_term: int = 10,
+        rate: float = 0.5,
+        **kwargs,
+    ) -> None:
+        super().__init__(
+            depth_init=depth_init,
+            depth_term=depth_term,
+            rate=rate,
+        )
+
+    def mask(self, *, x: Tensor, h: int, w: int) -> Tensor:
+        return torch.arange(h * w).expand(x.size(0), -1)
+
+    def drop(self, *, x: Tensor, m: Tensor) -> Tensor:
+        m = m.unsqueeze(-1).expand(-1, -1, x.size(-1))
+        x = x.gather(dim=1, index=m)
+        return x
+
+    def fuse(self, *, x: Tensor, m: Tensor, x_k: Tensor) -> Tensor:
+        m = m.unsqueeze(-1).expand(-1, -1, x.size(-1))
+        x = x_k.scatter(dim=1, index=m, src=x)
+        return x
+
+
+class TREADRouter(Router):
+    """
+    TREAD: Token Routing for Efficient DiT Training
+    Paper: https://arxiv.org/abs/2501.04765
+    """
+
+    def __init__(
+        self,
+        *,
+        depth_init: int = 2,
+        depth_term: int = 10,
+        rate: float = 0.5,
+        **kwargs,
+    ) -> None:
+        super().__init__(
+            depth_init=depth_init,
+            depth_term=depth_term,
+            rate=rate,
+        )
+
+    def mask(self, *, x: Tensor, h: int, w: int) -> Tensor:
+        B, S, _ = x.size()
+        mask = torch.rand((B, S), device=x.device)
+        mask = torch.argsort(mask, dim=1)
+        num_mask = math.floor(S * self.rate)
+        num_keep = S - num_mask
+        ids_keep = mask[:, :num_keep]
+        ids_keep = torch.sort(ids_keep, dim=1).values
+        ids_keep = ids_keep
+        return ids_keep
+
+    def drop(self, *, x: Tensor, m: Tensor) -> Tensor:
+        m = m.unsqueeze(-1).expand(-1, -1, x.size(-1))
+        x = x.gather(dim=1, index=m)
+        return x
+
+    def fuse(self, *, x: Tensor, m: Tensor, x_k: Tensor) -> Tensor:
+        m = m.unsqueeze(-1).expand(-1, -1, x.size(-1))
+        x = x_k.scatter(dim=1, index=m, src=x)
+        return x
+
+
+class SPRINTRouter(Router):
+    """
+    SPRINT: Sparse-Dense REsidual Fusion for Efficient Diffusion Transformers
+    Paper: https://arxiv.org/abs/2510.21986
+    """
+
+    def __init__(
+        self,
+        *,
+        n: int,
+        k: int,
+        dim: int,
+        dim_s: int,
+        dim_d: int,
+        depth_init: int = 2,
+        depth_term: int = 10,
+        **kwargs,
+    ) -> None:
+        assert 1 <= n, f"n must be greater or equal to 1, got instead n={n}"
+        assert 0 <= k <= n**2, f"k must be greater than zero and at most {n**2}, got instead k={k}"
+        super().__init__(depth_init=depth_init, depth_term=depth_term, rate=min(1, max(0, 1 - k / n**2)))
+        self.projection = nn.Linear(dim_d + dim_s, dim, bias=False)
+        self.mask_token = nn.Parameter(torch.randn(dim_s))
+        self.n: int = n
+
+    def mask(self, *, x: Tensor, h: int, w: int) -> Tensor:
+        B, S, _ = x.size()
+        H, W = h, w
+
+        # Adjust split based on aspect ratio
+        r: float = W / H
+        M: int = div(W, math.ceil(self.n * max(1, r)))
+        N: int = div(H, math.ceil(self.n * max(1, r**-1)))
+
+        # Group partition
+        H_G: int = H // N
+        W_G: int = W // M
+        S_G: int = H_G * W_G
+
+        # Amount of tokens per-partition
+        num_mask: int = math.floor(self.rate * S_G)
+        num_keep: int = S_G - num_mask
+
+        # Keep indices of random tokens per-partition
+        mask = torch.rand((B, N * M, S_G), device=x.device)
+        mask = torch.argsort(mask, dim=-1)[..., :num_keep]
+
+        # Compute absolute indices per-sequence of tokens
+        ids_keep = torch.arange(S, device=x.device).expand(B, -1)
+        ids_keep = cast(Tensor, einx.rearrange("b ((h_n h_g) (w_m w_g)) -> b (h_n w_m) (h_g w_g)", ids_keep, h_n=N, h_g=H_G, w_m=M, w_g=W_G))
+        ids_keep = torch.gather(ids_keep, dim=-1, index=mask)
+        ids_keep = ids_keep.flatten(1).sort(dim=-1).values
+        return ids_keep
+
+    def drop(self, *, x: Tensor, m: Tensor) -> Tensor:
+        m = m.unsqueeze(-1).expand(-1, -1, x.size(-1))
+        x = x.gather(dim=1, index=m)
+        return x
+
+    def fuse(self, *, x: Tensor, m: Tensor, x_k: Tensor) -> Tensor:
+        B, S, _ = x_k.size()
+        m = m.unsqueeze(-1).expand(-1, -1, x.size(-1))
+        x_sd = self.mask_token.expand(B, S, -1).scatter(dim=1, index=m, src=x)
+        x_ds = x_k
+        x_fuse = torch.cat([x_sd, x_ds], dim=-1)
+        x_fuse = self.projection.forward(x_fuse)
+        return x_fuse
 
 
 class SwiGLU(nn.Module):
