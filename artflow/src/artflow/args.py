@@ -69,6 +69,15 @@ class ModelArgs(Struct, kw_only=True):
     # Number of attention heads
     num_heads: int = 16
 
+    # SPRINT router grid size
+    router_n: int = 2
+
+    # SPRINT router kept size
+    router_k: int = 1
+
+    # Path-drop learning probability
+    path_drop: float = 0.05
+
     # Number of text embedder layers
     num_embedder_layers: int = 2
 
@@ -91,24 +100,21 @@ class ModelArgs(Struct, kw_only=True):
     dim_hidden_enc: int = 768
 
     # Channel dimension of decoder
-    dim_hidden_dec: int = 128
+    dim_hidden_dec: int = 768
 
 
 class OptimizerArgs(Struct, kw_only=True):
     """Arguments for Muon optimizer"""
 
     # Learning rate
-    lr: float = 1e-3
-
-    # Number of warmup steps
-    warmup: int = 1000
+    lr: float = 1e-4
 
 
 class TrainArgs(Struct, kw_only=True):
     """Arguments for training procedure"""
 
     # Number of samples in one batch
-    batch_size: int
+    batch_size: int = 16
 
     # Number of training steps
     steps: int = 1000

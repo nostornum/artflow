@@ -63,7 +63,7 @@ def precompute_freqs_cis_2d(d: int, h: int, w: int, theta: float = 10000.0, scal
 
 
 def apply_rotary_emb_cross(xq: torch.Tensor, xk: torch.Tensor, freq_cis: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-    freq_cis = freq_cis[None, None, :, :]
+    freq_cis = freq_cis[None, None, :, :] if freq_cis.ndim < 4 else freq_cis
     xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
     xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
     xq_out = torch.view_as_real(xq_ * freq_cis).flatten(3)
@@ -86,6 +86,10 @@ class Router(nn.Module, ABC):
         self.depth_init: int = depth_init
         self.depth_term: int = depth_term
         self.rate: float = rate
+
+    def skip(self, *, i: int) -> bool:
+        # Skip computation if drop rate is 100%
+        return not (i < self.depth_init or i > self.depth_term or self.rate != 1)
 
     @abstractmethod
     def mask(self, *, x: Tensor, h: int, w: int) -> Tensor:
@@ -250,7 +254,7 @@ class SPRINTRouter(Router):
     def fuse(self, *, x: Tensor, m: Tensor, x_k: Tensor) -> Tensor:
         B, S, _ = x_k.size()
         m = m.unsqueeze(-1).expand(-1, -1, x.size(-1))
-        x_sd = self.mask_token.expand(B, S, -1).scatter(dim=1, index=m, src=x)
+        x_sd = self.mask_token.expand(B, S, -1).type_as(x).scatter(dim=1, index=m, src=x)
         x_ds = x_k
         x_fuse = torch.cat([x_sd, x_ds], dim=-1)
         x_fuse = self.projection.forward(x_fuse)
@@ -619,9 +623,13 @@ class DeCo(nn.Module):
         num_decoder_layers: int = 2,
         mlp_ratio_txt: float = 4.0,
         mlp_ratio_enc: float = 4.0,
+        path_drop: float = 0.05,
+        router_n: int = 2,
+        router_k: int = 1,
     ) -> None:
         super().__init__()
 
+        self.path_drop: float = path_drop
         self.patch_size: int = patch_size
         self.dim_hidden: int = dim_hidden_enc
         self.dim_size_i: int = dim_size // 2
@@ -630,6 +638,7 @@ class DeCo(nn.Module):
         self.b_h_embedder = TimestepEmbedder(dim_freq=self.dim_size_i, dim_hidden=self.dim_size_i)
         self.b_w_embedder = TimestepEmbedder(dim_freq=self.dim_size_i, dim_hidden=self.dim_size_i)
         self.s_embedder = nn.Linear(self.dim_size_i * 2, dim_hidden_enc)
+        self.router: SPRINTRouter = SPRINTRouter(n=router_n, k=router_k, depth_init=2, dim=self.dim_hidden, dim_s=self.dim_hidden, dim_d=self.dim_hidden, depth_term=num_encoder_layers - 3)
 
         self.t_embedder = TimestepEmbedder(dim_freq=dim_timestep, dim_hidden=dim_hidden_enc)
         self.c_embedder = Embed(dim_input=dim_txt_emb, dim_embed=dim_hidden_enc, norm="RMSNorm")
@@ -701,9 +710,39 @@ class DeCo(nn.Module):
         x_r: Tensor = self.fetch_pos(E_Y, E_X, x.device)
         x_s: Tensor = self.p_embedder(x)
 
+        # Router state
+        x_m: Tensor = torch.empty(size=[0])
+        x_k: Tensor = torch.empty(size=[0])
+        x_o: Tensor = x_r.clone()
+
         # Perform DiT layers for condition
-        for layer in self.encoder:
-            x_s = layer(x=x_s, c=c_s, t=t_c, r=x_r)
+        for i, layer in enumerate(self.encoder):
+            # Select tokens for sparse-deep branch
+            if i == self.router.depth_init:
+                x_k: Tensor = x_s.clone()
+                x_m: Tensor = self.router.mask(x=x_s, h=E_Y, w=E_X)
+                x_s: Tensor = self.router.drop(x=x_s, m=x_m)
+                x_r: Tensor = x_r.expand(B, -1, -1).gather(dim=1, index=x_m.unsqueeze(-1).expand(-1, -1, x_r.size(-1))).unsqueeze(1)
+
+            # Perform DiT layer for condition
+            if not self.router.skip(i=i):
+                x_s: Tensor = layer(x=x_s, c=c_s, t=t_c, r=x_r)
+
+            # Fuse sparse-deep & deep-shallow branches
+            if i == self.router.depth_term:
+                # Path-Drop Learning: mask random image tokens
+                if self.training:
+                    m_rand: Tensor = torch.rand(size=[B, 1, 1], device=x_s.device)
+                    m_tokn: Tensor = self.router.mask_token.expand(B, 1, -1)
+                    m_drop: Tensor = m_rand <= self.path_drop
+                    x_s: Tensor = torch.where(m_drop, m_tokn, x_s)
+
+                # Path-Drop Guidance: mask sparse-deep branch
+                x_s: Tensor = self.router.mask_token.expand(B, x_s.size(1), -1) if self.router.rate == 1 else x_s
+
+                # Fuse sd and ds branches along with text tokens
+                x_s: Tensor = self.router.fuse(x=x_s, m=x_m, x_k=x_k)
+                x_r: Tensor = x_o
 
         # Inject time and project
         x_s: Tensor = F.silu(x_s + t_e)

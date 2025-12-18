@@ -12,16 +12,13 @@ import torch.nn.functional as F
 from accelerate import Accelerator
 from diffusers.models.autoencoders.autoencoder_kl_flux2 import AutoencoderKLFlux2
 from msgspec.structs import asdict
-from timm.optim.muon import Muon
-from torch import Tensor, FloatTensor
+from torch import FloatTensor, Tensor
 from torch.nn import Module
-from torch.optim import Optimizer
-from torch.optim.lr_scheduler import LRScheduler
+from torch.optim import AdamW, Optimizer
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import BatchEncoding, GemmaTokenizer
 from transformers.models.gemma3 import Gemma3ForCausalLM
-from transformers.optimization import get_cosine_schedule_with_warmup as CosineScheduler
 
 import wandb
 
@@ -39,7 +36,6 @@ class Trainer:
     vae: AutoencoderKLFlux2
     llm: Gemma3ForCausalLM
     tok: GemmaTokenizer
-    sch: LRScheduler
     opt: Optimizer
     model: DeCo
     args: Args
@@ -112,7 +108,6 @@ class Trainer:
             self.accelerator.backward(loss=loss)
             self.accelerator.clip_grad_norm_(self.model.parameters(), self.args.train.clip_grad)
             self.opt.step()
-            self.sch.step()
 
         return {
             "loss": loss.detach(),
@@ -124,38 +119,50 @@ class Trainer:
 
     @torch.no_grad()
     def sample(self, eps: Tensor, c_cond: Tensor, c_null: Tensor) -> Tensor:
+        model: DeCo = self.accelerator.unwrap_model(self.model)
+
+        # Sample time trajectory
         t: Tensor = torch.linspace(0, 1, steps=self.args.sample.timesteps + 1, device=self.accelerator.device)
         t: Tensor = self.shift_time(eps, t)
+
+        # Input parameters
         w: float = self.args.sample.w
+        r: float = model.router.rate
         B: int = eps.size(0)
+
+        # Use noise as x0
         x: Tensor = eps
 
         for t_curr, t_next in zip(t, t[1:]):
             t_curr: Tensor = t_curr.expand(B, 1, 1, 1)
-            x_con: Tensor = self.model.forward(x, t_curr, c_cond)
-            x_unc: Tensor = self.model.forward(x, t_curr, c_null)
+
+            model.router.rate = 0
+            x_con: Tensor = model.forward(x=x, t=t_curr, c=c_cond)
             v_con: Tensor = (x_con - x) / (1 - t_curr).clamp_min(0.05)
+
+            model.router.rate = 1
+            x_unc: Tensor = model.forward(x=x, t=t_curr, c=c_null)
             v_unc: Tensor = (x_unc - x) / (1 - t_curr).clamp_min(0.05)
+
+            model.router.rate = r
             v_cfg: Tensor = v_unc + w * (v_con - v_unc)
             x: Tensor = x + (t_next - t_curr) * v_cfg
 
         return (self.imgs_decode(x) * 0.5 + 0.5).clip(0, 1)
 
     @staticmethod
-    def save(ckpt_dir: str, dataloader: DataLoader, accelerator: Accelerator, model: Module, optimizer: Optimizer, scheduler: LRScheduler, step: int) -> None:
+    def save(ckpt_dir: str, dataloader: DataLoader, accelerator: Accelerator, model: Module, optimizer: Optimizer, step: int) -> None:
         state_dict: Dict[str, Any] = {}
         state_dict["model"] = accelerator.unwrap_model(model).state_dict()
         state_dict["optimizer"] = optimizer.state_dict()
-        state_dict["scheduler"] = scheduler.state_dict()
         state_dict["step"] = step
         accelerator.save(state_dict, os.path.join(ckpt_dir, f"checkpoint_{step}.pth"))
 
     @staticmethod
-    def load(ckpt_path: str, dataloader: DataLoader, accelerator: Accelerator, model: Module, optimizer: Optimizer, scheduler: LRScheduler) -> int:
+    def load(ckpt_path: str, dataloader: DataLoader, accelerator: Accelerator, model: Module, optimizer: Optimizer) -> int:
         state_dict: Dict[str, Any] = torch.load(ckpt_path, map_location="cpu")
         accelerator.unwrap_model(model).load_state_dict(state_dict["model"])
         optimizer.load_state_dict(state_dict["optimizer"])
-        scheduler.load_state_dict(state_dict["scheduler"])
         return state_dict["step"]
 
 
@@ -212,17 +219,12 @@ def train(args: Args) -> None:
     print("Params: ", num_params(model))
 
     # Setup accelerator
-    opt: Optimizer = Muon(model.parameters(), args.train.optim.lr)
-    sch: LRScheduler = CosineScheduler(opt, args.train.optim.warmup, args.train.steps)
+    opt: Optimizer = AdamW(params=model.parameters(), lr=args.train.optim.lr, weight_decay=0)
     accelerator: Accelerator = Accelerator(mixed_precision="bf16", log_with="wandb", gradient_accumulation_steps=args.train.grad_accumulation_steps)
-    loader, llm, vae, model, opt, sch = accelerator.prepare(loader, llm, vae, model, opt, sch)
+    loader, llm, vae, model, opt = accelerator.prepare(loader, llm, vae, model, opt)
 
     # Setup experiment
-    run_args: Dict[str, Any] = dict(
-        project=args.track.project,
-        id=args.track.run_id,
-        dir=args.track.path,
-    )
+    run_args: Dict[str, Any] = dict(project=args.track.project, id=args.track.run_id, dir=args.track.path)
 
     # Unwrap models
     vae = cast(AutoencoderKLFlux2, vae.module if accelerator.num_processes != 1 else vae)
@@ -230,7 +232,7 @@ def train(args: Args) -> None:
     model = cast(DeCo, model)
 
     # Resume from checkpoint
-    step: int = Trainer.load(os.path.join(args.train.ckpt_folder, args.train.ckpt_resume), loader, accelerator, model, opt, sch) if args.train.ckpt_resume else 0
+    step: int = Trainer.load(os.path.join(args.train.ckpt_folder, args.train.ckpt_resume), loader, accelerator, model, opt) if args.train.ckpt_resume else 0
 
     # Initialize experiment
     accelerator.init_trackers(args.track.project, config=flatten(normalize((args))), init_kwargs=run_args)
@@ -244,26 +246,26 @@ def train(args: Args) -> None:
         llm=llm,
         tok=tok,
         opt=opt,
-        sch=sch,
     )
 
     # Use prompt file for sampling
     with torch.no_grad():
-        c_emb: Tensor = trainer.text_encode(read_prompts(args.sample.promptfile)[: args.sample.batch])
         c_unc: Tensor = trainer.text_encode([""])
 
     # Training
     for batch in tqdm(loader, disable=not accelerator.is_main_process):
-        out: Dict[str, Tensor] = trainer.step(batch, c_unc)
+        out: Dict[str, Tensor] = trainer.step(batch, c_null=c_unc)
 
         if step % args.track.ckpt_every == 0:
-            Trainer.save(args.train.ckpt_folder, loader, accelerator, model, opt, sch, step)
+            Trainer.save(args.train.ckpt_folder, loader, accelerator, model, opt, step)
 
         if step % args.track.loss_every == 0:
             accelerator.log({"train/loss": out["loss"].cpu().item()}, step)
+            del out["loss"]
             accelerator.log({"train/cfm": out["cfm"].cpu().item()}, step)
+            del out["cfm"]
             accelerator.log({"train/l2": out["mse"].cpu().item()}, step)
-            accelerator.log({"train/lr": sch.get_last_lr()[0]}, step)
+            del out["mse"]
 
         if step % args.track.eval_every == 0:
             model.eval()
@@ -272,6 +274,7 @@ def train(args: Args) -> None:
             x_rgb: Tensor = batch["image"][: args.sample.batch].cpu()
             x_eps: Tensor = out["eps"][: args.sample.batch]
             b_emb: Tensor = out["emb"][: args.sample.batch]
+            torch.cuda.empty_cache()
 
             # Sample using entries
             x_out: Tensor = trainer.sample(eps=torch.randn_like(x_eps), c_cond=b_emb, c_null=c_unc).cpu()
@@ -279,9 +282,11 @@ def train(args: Args) -> None:
             plt.close(m)
 
             # Sample using prompts
+            c_emb: Tensor = trainer.text_encode(caption=read_prompts(args.sample.promptfile)[: args.sample.batch])
             x_out: Tensor = trainer.sample(eps=torch.randn_like(x_eps), c_cond=c_emb, c_null=c_unc).cpu()
             accelerator.log({"eval/prompt": (m := makegrid(x_out))}, step)
             plt.close(m)
+            del c_emb
 
             # Send inputs
             accelerator.log({"eval/inputs": (m := makegrid(x_rgb))}, step)

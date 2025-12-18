@@ -1,5 +1,5 @@
 accelerate launch artflow/src/artflow                 \
- --seed 22                                            \
+ --seed 5                                             \
  --track.ckpt-every 500                               \
  --track.eval-every 500                               \
  --track.loss-every 10                                \
@@ -9,28 +9,34 @@ accelerate launch artflow/src/artflow                 \
  --dataset.buckets.partitions 320 224                 \
  --dataset.buckets.sampling F                         \
  --dataset.buckets.asp_dis 0.1                        \
- --dataset.buckets.max_res inf                        \
+ --dataset.buckets.max_res 8192                       \
  --dataset.buckets.min_res 128                        \
- --sample.promptfile prompts.txt                      \
- --train.ckpt-resume checkpoint_104500.pth            \
+ --train.grad-accumulation-steps 1                    \
+ --train.ckpt-resume checkpoint_12000.pth             \
  --train.ckpt-folder ckpt                             \
- --train.batch-size 42                                \
- --train.steps 200000
+ --train.batch-size 54                                \
+ --train.steps 500000                                 \
+ --sample.promptfile prompts.txt                      \
+ --sample.batch 30                                    \
+ --vae.batch 27
 
 
 uv run python -m artflow                              \
- --track.ckpt-every 1000                              \
- --track.eval-every 200                               \
- --track.run-id 7dysxkig                              \
+ --seed 0                                             \
+ --track.ckpt-every 500                               \
+ --track.eval-every 500                               \
  --track.loss-every 10                                \
  --track.path logs                                    \
  --dataset.path data/danbooru                         \
- --dataset.num-workers 16                             \
- --dataset.buckets.partitions 256 256 320 224 224 320 \
+ --dataset.num-workers 4                              \
+ --dataset.buckets.partitions 320 224                 \
+ --dataset.buckets.sampling F                         \
  --dataset.buckets.asp_dis 0.1                        \
  --dataset.buckets.max_res 8192                       \
  --dataset.buckets.min_res 128                        \
  --sample.promptfile prompts.txt                      \
+ --train.grad-accumulation-steps 1                    \
  --train.ckpt-folder ckpt                             \
- --train.batch-size 32                                \
- --train.steps 10000
+ --train.batch-size 48                                \
+ --train.steps 500000                                 \
+ --vae.batch 48
