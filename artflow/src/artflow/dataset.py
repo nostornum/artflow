@@ -32,11 +32,11 @@ class DanbooruDataset(Dataset):
 
         meta: LazyFrame = pl.scan_ndjson(self.path / "metadata_data.ndjson")
         data: LazyFrame = pl.scan_parquet(path_label)
-        data = data.join(meta, on="id")
-        data = data.with_columns(path=pl.format("{}{}{}{}", pl.col("tar").str.replace(".tar", ""), pl.lit(os.path.sep), pl.col("id"), pl.lit(".jpg")))
-        data = data.sort(by="id")
-        data = data.select(pl.col("path"), pl.col("image_height").alias("h"), pl.col("image_width").alias("w"), pl.col("tag_string").alias("caption"), pl.col("score"))
-        data = data.with_row_index("index")
+        data: LazyFrame = data.join(meta, on="id")
+        data: LazyFrame = data.with_columns(path=pl.format("{}{}{}{}", pl.col("tar").str.replace(".tar", ""), pl.lit(os.path.sep), pl.col("id"), pl.lit(".jpg")))
+        data: LazyFrame = data.sort(by="id")
+        data: LazyFrame = data.select(pl.col("path"), pl.col("image_height").alias("h"), pl.col("image_width").alias("w"), pl.col("tag_string").alias("caption"), pl.col("score"))
+        data: LazyFrame = data.with_row_index("index")
         data.sink_ipc(path_arrow)
         return self.__makedata()
 

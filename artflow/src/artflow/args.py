@@ -56,6 +56,9 @@ class VAEArgs(Struct, kw_only=True):
     # Latent scaling factor
     scaling_factor: float = 1 / 1.6601
 
+    # Multipass encode/decode
+    batch: int = 16
+
 
 class ModelArgs(Struct, kw_only=True):
     """Arguments for the diffusion model"""

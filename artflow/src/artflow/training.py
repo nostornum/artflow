@@ -13,7 +13,7 @@ from accelerate import Accelerator
 from diffusers.models.autoencoders.autoencoder_kl_flux2 import AutoencoderKLFlux2
 from msgspec.structs import asdict
 from timm.optim.muon import Muon
-from torch import FloatTensor, Tensor
+from torch import Tensor, FloatTensor
 from torch.nn import Module
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
@@ -59,12 +59,13 @@ class Trainer:
         return text_emb[-1].float()
 
     def imgs_encode(self, image: Tensor) -> Tensor:
-        latent: Tensor = cast(Any, self.vae.encode(image)).latent_dist.sample() * self.args.vae.scaling_factor
-        return latent
+        latents = [cast(Any, self.vae.encode(x)).latent_dist.sample() for x in image.split(self.args.vae.batch)]
+        return torch.cat(latents, dim=0) * self.args.vae.scaling_factor
 
     def imgs_decode(self, latent: Tensor) -> Tensor:
-        image: Tensor = cast(Any, self.vae.decode(cast(FloatTensor, latent / self.args.vae.scaling_factor))).sample
-        return image
+        latent = latent / self.args.vae.scaling_factor
+        images = [cast(Any, self.vae.decode(cast(FloatTensor, x))).sample for x in latent.split(self.args.vae.batch)]
+        return torch.cat(images, dim=0)
 
     def shift_time(self, x: Tensor, t: Tensor) -> Tensor:
         m: int = prod(x.shape[1:])

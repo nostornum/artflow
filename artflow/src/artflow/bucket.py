@@ -33,12 +33,12 @@ class AspectRatioPartition:
         )
 
         query: LazyFrame = data.lazy()
-        query = query.filter(pl.min_horizontal("h", "w") >= self.min_res)
-        query = query.filter(pl.max_horizontal("h", "w") <= self.max_res)
-        query = query.with_columns(ar=pl.col.w.truediv(pl.col.h))
-        query = query.sort(by=pl.col.ar)
-        query = query.join_asof(buckets, on="ar", strategy="nearest", tolerance=self.asp_dis, coalesce=True)
-        query = query.filter(~pl.col.bucket.is_null()).drop("index", strict=False).with_row_index("index")
+        query: LazyFrame = query.filter(pl.min_horizontal("h", "w") >= self.min_res)
+        query: LazyFrame = query.filter(pl.max_horizontal("h", "w") <= self.max_res)
+        query: LazyFrame = query.with_columns(ar=pl.col.w.truediv(pl.col.h))
+        query: LazyFrame = query.sort(by=pl.col.ar)
+        query: LazyFrame = query.join_asof(buckets, on="ar", strategy="nearest", tolerance=self.asp_dis, coalesce=True)
+        query: LazyFrame = query.filter(~pl.col.bucket.is_null()).drop("index", strict=False).with_row_index("index")
         return query.collect()
 
 
@@ -91,4 +91,11 @@ class BucketTransform:
 
     @staticmethod
     def create(size: Tuple[int, int]) -> T.Transform:
-        return T.Compose([T.Resize(min(size), InterpolationMode.LANCZOS), T.RandomCrop(size, pad_if_needed=True, padding_mode="reflect"), T.ToImage(), T.ToDtype(dtype=torch.float32, scale=True)])
+        return T.Compose(
+            [
+                T.Resize(min(size), InterpolationMode.LANCZOS),
+                T.RandomCrop(size, pad_if_needed=True, padding_mode="reflect"),
+                T.ToImage(),
+                T.ToDtype(dtype=torch.float32, scale=True),
+            ]
+        )
