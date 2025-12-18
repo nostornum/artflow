@@ -1,5 +1,5 @@
 accelerate launch artflow/src/artflow                 \
- --seed 5                                             \
+ --seed 13                                            \
  --track.ckpt-every 500                               \
  --track.eval-every 500                               \
  --track.loss-every 10                                \
@@ -12,13 +12,13 @@ accelerate launch artflow/src/artflow                 \
  --dataset.buckets.max_res 8192                       \
  --dataset.buckets.min_res 128                        \
  --train.grad-accumulation-steps 1                    \
- --train.ckpt-resume checkpoint_12000.pth             \
+ --train.ckpt-resume checkpoint_21000.pth             \
  --train.ckpt-folder ckpt                             \
- --train.batch-size 54                                \
+ --train.batch-size 64                                \
  --train.steps 500000                                 \
  --sample.promptfile prompts.txt                      \
  --sample.batch 30                                    \
- --vae.batch 27
+ --vae.batch 32
 
 
 uv run python -m artflow                              \

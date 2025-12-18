@@ -18,7 +18,7 @@ from torch.optim import AdamW, Optimizer
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import BatchEncoding, GemmaTokenizer
-from transformers.models.gemma3 import Gemma3ForCausalLM
+from transformers.models.gemma3 import Gemma3ForCausalLM, Gemma3TextModel
 
 import wandb
 
@@ -34,7 +34,7 @@ class Trainer:
     _: KW_ONLY
     accelerator: Accelerator
     vae: AutoencoderKLFlux2
-    llm: Gemma3ForCausalLM
+    llm: Gemma3TextModel
     tok: GemmaTokenizer
     opt: Optimizer
     model: DeCo
@@ -205,10 +205,10 @@ def train(args: Args) -> None:
         token=os.environ["HF_TOKEN"],
         subfolder="vae",
     )
-    llm: Gemma3ForCausalLM = Gemma3ForCausalLM.from_pretrained(
+    llm: Gemma3TextModel = Gemma3ForCausalLM.from_pretrained(
         pretrained_model_name_or_path=args.llm.ckpt,
         token=os.environ["HF_TOKEN"],
-    )
+    ).model
     tok: GemmaTokenizer = GemmaTokenizer.from_pretrained(
         pretrained_model_name_or_path=args.llm.ckpt,
         token=os.environ["HF_TOKEN"],
@@ -221,20 +221,18 @@ def train(args: Args) -> None:
     # Setup accelerator
     opt: Optimizer = AdamW(params=model.parameters(), lr=args.train.optim.lr, weight_decay=0)
     accelerator: Accelerator = Accelerator(mixed_precision="bf16", log_with="wandb", gradient_accumulation_steps=args.train.grad_accumulation_steps)
-    loader, llm, vae, model, opt = accelerator.prepare(loader, llm, vae, model, opt)
+    loader, model, opt = accelerator.prepare(loader, model, opt)
 
-    # Setup experiment
-    run_args: Dict[str, Any] = dict(project=args.track.project, id=args.track.run_id, dir=args.track.path)
-
-    # Unwrap models
-    vae = cast(AutoencoderKLFlux2, vae.module if accelerator.num_processes != 1 else vae)
-    llm = cast(Gemma3ForCausalLM, llm.module if accelerator.num_processes != 1 else llm)
-    model = cast(DeCo, model)
+    # Send models to device
+    vae: AutoencoderKLFlux2 = vae.to(accelerator.device)
+    llm: Gemma3TextModel = llm.to(accelerator.device)
+    model: DeCo = model
 
     # Resume from checkpoint
     step: int = Trainer.load(os.path.join(args.train.ckpt_folder, args.train.ckpt_resume), loader, accelerator, model, opt) if args.train.ckpt_resume else 0
 
     # Initialize experiment
+    run_args: Dict[str, Any] = dict(project=args.track.project, id=args.track.run_id, dir=args.track.path)
     accelerator.init_trackers(args.track.project, config=flatten(normalize((args))), init_kwargs=run_args)
 
     # Initialize trainer

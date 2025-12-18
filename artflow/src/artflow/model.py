@@ -1,6 +1,5 @@
 import math
 
-from abc import ABC, abstractmethod
 from functools import cache
 from typing import Dict, Literal, Tuple, cast
 
@@ -71,150 +70,19 @@ def apply_rotary_emb_cross(xq: torch.Tensor, xk: torch.Tensor, freq_cis: torch.T
     return xq_out.type_as(xq), xk_out.type_as(xk)
 
 
-class Router(nn.Module, ABC):
-    Kind = Literal["PASS", "TREAD", "SPRINT"]
-
-    def __init__(
-        self,
-        *,
-        depth_init: int,
-        depth_term: int,
-        rate: float,
-        **kwargs,
-    ) -> None:
-        super().__init__()
-        self.depth_init: int = depth_init
-        self.depth_term: int = depth_term
-        self.rate: float = rate
-
-    def skip(self, *, i: int) -> bool:
-        # Skip computation if drop rate is 100%
-        return not (i < self.depth_init or i > self.depth_term or self.rate != 1)
-
-    @abstractmethod
-    def mask(self, *, x: Tensor, h: int, w: int) -> Tensor:
-        # x: [B, S, D] -> m: [B, S]
-        raise NotImplementedError()
-
-    @abstractmethod
-    def drop(self, *, x: Tensor, m: Tensor) -> Tensor:
-        # x: [B, S0, D], m: [B, S1, D] -> x': [B, S1, D]
-        raise NotImplementedError()
-
-    @abstractmethod
-    def fuse(self, *, x: Tensor, m: Tensor, x_k: Tensor) -> Tensor:
-        # x: [B, S1, D], m: [B, S1, D], x_o: [B, S0, D] -> x': [B, S0, D]
-        raise NotImplementedError()
-
-    @classmethod
-    def create(cls, kind: Kind, **kwargs) -> "Router":
-        match kind:
-            case "PASS":
-                return PASSRouter(**kwargs)
-            case "TREAD":
-                return TREADRouter(**kwargs)
-            case "SPRINT":
-                return SPRINTRouter(**kwargs)
-
-
-class PASSRouter(Router):
-    """
-    PASS: Router that just passes its' input to the output
-    """
-
-    def __init__(
-        self,
-        *,
-        depth_init: int = 2,
-        depth_term: int = 10,
-        rate: float = 0.5,
-        **kwargs,
-    ) -> None:
-        super().__init__(
-            depth_init=depth_init,
-            depth_term=depth_term,
-            rate=rate,
-        )
-
-    def mask(self, *, x: Tensor, h: int, w: int) -> Tensor:
-        return torch.arange(h * w).expand(x.size(0), -1)
-
-    def drop(self, *, x: Tensor, m: Tensor) -> Tensor:
-        m = m.unsqueeze(-1).expand(-1, -1, x.size(-1))
-        x = x.gather(dim=1, index=m)
-        return x
-
-    def fuse(self, *, x: Tensor, m: Tensor, x_k: Tensor) -> Tensor:
-        m = m.unsqueeze(-1).expand(-1, -1, x.size(-1))
-        x = x_k.scatter(dim=1, index=m, src=x)
-        return x
-
-
-class TREADRouter(Router):
-    """
-    TREAD: Token Routing for Efficient DiT Training
-    Paper: https://arxiv.org/abs/2501.04765
-    """
-
-    def __init__(
-        self,
-        *,
-        depth_init: int = 2,
-        depth_term: int = 10,
-        rate: float = 0.5,
-        **kwargs,
-    ) -> None:
-        super().__init__(
-            depth_init=depth_init,
-            depth_term=depth_term,
-            rate=rate,
-        )
-
-    def mask(self, *, x: Tensor, h: int, w: int) -> Tensor:
-        B, S, _ = x.size()
-        mask = torch.rand((B, S), device=x.device)
-        mask = torch.argsort(mask, dim=1)
-        num_mask = math.floor(S * self.rate)
-        num_keep = S - num_mask
-        ids_keep = mask[:, :num_keep]
-        ids_keep = torch.sort(ids_keep, dim=1).values
-        ids_keep = ids_keep
-        return ids_keep
-
-    def drop(self, *, x: Tensor, m: Tensor) -> Tensor:
-        m = m.unsqueeze(-1).expand(-1, -1, x.size(-1))
-        x = x.gather(dim=1, index=m)
-        return x
-
-    def fuse(self, *, x: Tensor, m: Tensor, x_k: Tensor) -> Tensor:
-        m = m.unsqueeze(-1).expand(-1, -1, x.size(-1))
-        x = x_k.scatter(dim=1, index=m, src=x)
-        return x
-
-
-class SPRINTRouter(Router):
+class SPRINTRouter(nn.Module):
     """
     SPRINT: Sparse-Dense REsidual Fusion for Efficient Diffusion Transformers
     Paper: https://arxiv.org/abs/2510.21986
     """
 
-    def __init__(
-        self,
-        *,
-        n: int,
-        k: int,
-        dim: int,
-        dim_s: int,
-        dim_d: int,
-        depth_init: int = 2,
-        depth_term: int = 10,
-        **kwargs,
-    ) -> None:
-        assert 1 <= n, f"n must be greater or equal to 1, got instead n={n}"
-        assert 0 <= k <= n**2, f"k must be greater than zero and at most {n**2}, got instead k={k}"
-        super().__init__(depth_init=depth_init, depth_term=depth_term, rate=min(1, max(0, 1 - k / n**2)))
-        self.projection = nn.Linear(dim_d + dim_s, dim, bias=False)
-        self.mask_token = nn.Parameter(torch.randn(dim_s))
+    def __init__(self, *, n: int, k: int, dim: int, depth_init: int = 2, depth_term: int = 10) -> None:
+        super().__init__()
+        self.projection = nn.Linear(2 * dim, dim, bias=False)
+        self.mask_token = nn.Parameter(torch.zeros(dim))
+        self.rate: float = min(1, max(0, 1 - k / n**2))
+        self.depth_init: int = depth_init
+        self.depth_term: int = depth_term
         self.n: int = n
 
     def mask(self, *, x: Tensor, h: int, w: int) -> Tensor:
@@ -259,6 +127,9 @@ class SPRINTRouter(Router):
         x_fuse = torch.cat([x_sd, x_ds], dim=-1)
         x_fuse = self.projection.forward(x_fuse)
         return x_fuse
+
+    def skip(self, *, i: int) -> bool:
+        return not (i < self.depth_init or i > self.depth_term or self.rate != 1)
 
 
 class SwiGLU(nn.Module):
@@ -638,7 +509,7 @@ class DeCo(nn.Module):
         self.b_h_embedder = TimestepEmbedder(dim_freq=self.dim_size_i, dim_hidden=self.dim_size_i)
         self.b_w_embedder = TimestepEmbedder(dim_freq=self.dim_size_i, dim_hidden=self.dim_size_i)
         self.s_embedder = nn.Linear(self.dim_size_i * 2, dim_hidden_enc)
-        self.router: SPRINTRouter = SPRINTRouter(n=router_n, k=router_k, depth_init=2, dim=self.dim_hidden, dim_s=self.dim_hidden, dim_d=self.dim_hidden, depth_term=num_encoder_layers - 3)
+        self.router: SPRINTRouter = SPRINTRouter(n=router_n, k=router_k, depth_init=2, dim=self.dim_hidden, depth_term=num_encoder_layers - 3)
 
         self.t_embedder = TimestepEmbedder(dim_freq=dim_timestep, dim_hidden=dim_hidden_enc)
         self.c_embedder = Embed(dim_input=dim_txt_emb, dim_embed=dim_hidden_enc, norm="RMSNorm")
@@ -731,11 +602,8 @@ class DeCo(nn.Module):
             # Fuse sparse-deep & deep-shallow branches
             if i == self.router.depth_term:
                 # Path-Drop Learning: mask random image tokens
-                if self.training:
-                    m_rand: Tensor = torch.rand(size=[B, 1, 1], device=x_s.device)
-                    m_tokn: Tensor = self.router.mask_token.expand(B, 1, -1)
-                    m_drop: Tensor = m_rand <= self.path_drop
-                    x_s: Tensor = torch.where(m_drop, m_tokn, x_s)
+                if self.training and torch.rand(1, device=x.device).item() < self.path_drop:
+                    x_s: Tensor = x_s * 0.0 + self.router.mask_token.expand_as(x_s)
 
                 # Path-Drop Guidance: mask sparse-deep branch
                 x_s: Tensor = self.router.mask_token.expand(B, x_s.size(1), -1) if self.router.rate == 1 else x_s
