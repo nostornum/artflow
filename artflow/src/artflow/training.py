@@ -226,14 +226,13 @@ def train(args: Args) -> None:
     # Send models to device
     vae: AutoencoderKLFlux2 = vae.to(accelerator.device)
     llm: Gemma3TextModel = llm.to(accelerator.device)
-    model: DeCo = model
-
-    # Resume from checkpoint
-    step: int = Trainer.load(os.path.join(args.train.ckpt_folder, args.train.ckpt_resume), loader, accelerator, model, opt) if args.train.ckpt_resume else 0
 
     # Initialize experiment
     run_args: Dict[str, Any] = dict(project=args.track.project, id=args.track.run_id, dir=args.track.path)
     accelerator.init_trackers(args.track.project, config=flatten(normalize((args))), init_kwargs=run_args)
+
+    # Resume from checkpoint
+    step: int = Trainer.load(os.path.join(args.train.ckpt_folder, args.train.ckpt_resume), loader, accelerator, model, opt) if args.train.ckpt_resume else 0
 
     # Initialize trainer
     trainer = Trainer(

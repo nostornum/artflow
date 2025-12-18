@@ -1,6 +1,8 @@
 from dataclasses import KW_ONLY, dataclass
 from typing import Any, Dict, Iterator, List, Literal, Tuple
 
+import PIL
+import PIL.Image
 import polars as pl
 import torch
 import torchvision.transforms.v2 as T
@@ -9,7 +11,6 @@ from PIL.Image import Image
 from polars import DataFrame, LazyFrame
 from torch import Generator, Tensor
 from torch.utils.data import Sampler
-from torchvision.transforms.v2 import InterpolationMode
 
 
 @dataclass
@@ -93,9 +94,17 @@ class BucketTransform:
     def create(size: Tuple[int, int]) -> T.Transform:
         return T.Compose(
             [
-                T.Resize(min(size), InterpolationMode.LANCZOS),
-                T.RandomCrop(size, pad_if_needed=True, padding_mode="reflect"),
+                T.Lambda(lambda img: BucketTransform.resize_to_cover(img, size[0], size[1])),
+                T.RandomCrop(size),
                 T.ToImage(),
                 T.ToDtype(dtype=torch.float32, scale=True),
             ]
         )
+
+    @staticmethod
+    def resize_to_cover(img: Image, target_h: int, target_w: int) -> Image:
+        w, h = img.size
+        scale: float = max(target_w / w, target_h / h)
+        new_w = int(round(w * scale))
+        new_h = int(round(h * scale))
+        return img.resize((new_w, new_h), resample=PIL.Image.Resampling.LANCZOS)
