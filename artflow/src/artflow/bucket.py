@@ -93,7 +93,7 @@ class BucketTransform:
     @staticmethod
     def create(size: Tuple[int, int]) -> T.Transform:
         return T.Compose(
-            [
+            transforms=[
                 T.Lambda(lambda img: BucketTransform.resize_to_cover(img, size[0], size[1])),
                 T.RandomCrop(size),
                 T.ToImage(),

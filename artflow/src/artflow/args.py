@@ -167,7 +167,7 @@ class SampleArgs(Struct, kw_only=True):
     """Arguments for generating new samples"""
 
     # Weight for classifier-free guidance
-    w: float = 3.0
+    w: float = 2.0
 
     # Batch size for sampling
     batch: int = 16

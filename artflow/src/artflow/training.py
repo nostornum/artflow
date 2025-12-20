@@ -70,8 +70,6 @@ class Trainer:
         return s * t / (1 + (s - 1) * t)
 
     def step(self, batch: Dict[str, Any], c_null: Tensor) -> Dict[str, Tensor]:
-        self.opt.zero_grad(set_to_none=True)
-
         with torch.no_grad():
             # Encode inputs
             B: int = batch["image"].size(0)
@@ -82,9 +80,11 @@ class Trainer:
             mask: Tensor = torch.rand(B, device=x.device) < self.args.train.cond_drop
             c[mask] = c_null
 
-            # Sample timestep
+            # Sample noise from Gaussian
             e: Tensor = torch.randn_like(x)
-            t: Tensor = torch.rand([B, 1, 1, 1], device=self.accelerator.device)
+
+            # Logit normal sampling for time then shift
+            t: Tensor = torch.randn(size=[B, 1, 1, 1], device=self.accelerator.device).sigmoid()
             t: Tensor = self.shift_time(x, t)
 
             # Compute target
@@ -108,6 +108,7 @@ class Trainer:
             self.accelerator.backward(loss=loss)
             self.accelerator.clip_grad_norm_(self.model.parameters(), self.args.train.clip_grad)
             self.opt.step()
+            self.opt.zero_grad()
 
         return {
             "loss": loss.detach(),

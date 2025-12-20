@@ -24,19 +24,34 @@ def normalize(o: Struct) -> Dict[str, Any]:
     return {k: normalize(v) for k, v in asdict(o).items()} if isinstance(o, Struct) else o
 
 
-def makegrid(x: Tensor) -> Figure:
+def makegrid(x: Tensor, dpi: int = 100) -> Figure:
+    # x: (B, C, H, W)
     x = einops.rearrange(x, "b c h w -> b h w c")
-    B: int = x.size(0)
-    M: int = math.ceil(math.sqrt(B))
-    N: int = math.ceil(B / M)
-    F, A = plt.subplots(N, M, figsize=(M * 2.5, N * 2.5))
+    B, H, W, _ = x.shape
+
+    M = math.ceil(math.sqrt(B))
+    N = math.ceil(B / M)
+
+    # Native-size figure in inches
+    figsize = (M * W / dpi, N * H / dpi)
+
+    F, A = plt.subplots(
+        N,
+        M,
+        figsize=figsize,
+        dpi=dpi,
+        squeeze=False,
+    )
+
     A = A.flatten()
+
     for i, a in enumerate(A):
         if i < B:
             a.imshow(x[i])
-            a.set_title(f"Sample {i}", fontsize=10)
         a.axis("off")
-    F.tight_layout()
+
+    # Prevent matplotlib from resizing the figure
+    F.subplots_adjust(left=0, right=1, bottom=0, top=1, wspace=0, hspace=0)
     return F
 
 
