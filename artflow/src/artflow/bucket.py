@@ -1,5 +1,5 @@
 from dataclasses import KW_ONLY, dataclass
-from typing import Any, Dict, Iterator, List, Literal, Tuple
+from typing import Dict, Iterator, List, Literal, Tuple
 
 import PIL
 import PIL.Image
@@ -74,12 +74,6 @@ class RandomBucketSampler(Sampler[List[int]]):
 
     def __len__(self) -> int:
         return self.num_samples
-
-    def state_dict(self) -> Dict[str, Tensor]:
-        return {"batch_sampler": self._rng.get_state()}
-
-    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
-        self._rng.set_state(state_dict["batch_sampler"])
 
 
 @dataclass

@@ -1,5 +1,5 @@
 accelerate launch artflow/src/artflow                 \
- --seed 72                                            \
+ --seed 86                                            \
  --track.ckpt-every 500                               \
  --track.eval-every 500                               \
  --track.loss-every 10                                \
@@ -7,14 +7,14 @@ accelerate launch artflow/src/artflow                 \
  --dataset.path data/danbooru                         \
  --dataset.num-workers 6                              \
  --dataset.buckets.partitions 320 224 288 224 256 256 224 320 \
- --dataset.buckets.sampling U                         \
+ --dataset.buckets.sampling F                         \
  --dataset.buckets.asp_dis 0.1                        \
  --dataset.buckets.max_res inf                        \
  --dataset.buckets.min_res 256                        \
  --model.router_k 1                                   \
  --model.router_n 2                                   \
  --train.grad-accumulation-steps 1                    \
- --train.ckpt-resume checkpoint_116000.pth            \
+ --train.ckpt-resume checkpoint_140000.pth            \
  --train.ckpt-folder ckpt                             \
  --train.optim.lr 1e-4                                \
  --train.batch-size 64                                \

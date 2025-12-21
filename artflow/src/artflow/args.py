@@ -44,7 +44,7 @@ class LLMArgs(Struct, kw_only=True):
     ckpt: str = "google/gemma-3-270m"
 
     # Maximum text sequence length
-    max_length: int = 128
+    max_length: int = 384
 
 
 class VAEArgs(Struct, kw_only=True):
@@ -54,7 +54,7 @@ class VAEArgs(Struct, kw_only=True):
     ckpt: str = "black-forest-labs/FLUX.2-dev"
 
     # Latent scaling factor
-    scaling_factor: float = 1 / 1.6601
+    scaling_factor: float = 1 / 1.75
 
     # Multipass encode/decode
     batch: int = 16

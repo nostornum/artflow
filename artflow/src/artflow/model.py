@@ -90,9 +90,8 @@ class SPRINTRouter(nn.Module):
         H, W = h, w
 
         # Adjust split based on aspect ratio
-        r: float = W / H
-        M: int = div(W, math.ceil(self.n * max(1, r)))
-        N: int = div(H, math.ceil(self.n * max(1, r**-1)))
+        N: int = self.n
+        M: int = self.n
 
         # Group partition
         H_G: int = H // N
