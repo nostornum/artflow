@@ -44,7 +44,7 @@ class LLMArgs(Struct, kw_only=True):
     ckpt: str = "google/gemma-3-270m"
 
     # Maximum text sequence length
-    max_length: int = 384
+    max_length: int = 512
 
 
 class VAEArgs(Struct, kw_only=True):
@@ -173,7 +173,7 @@ class SampleArgs(Struct, kw_only=True):
     batch: int = 16
 
     # Number of sampling steps
-    timesteps: int = 75
+    timesteps: int = 50
 
     # Path to the prompt file
     promptfile: str

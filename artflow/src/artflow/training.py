@@ -90,12 +90,12 @@ class Trainer:
             # Compute target
             x_g: Tensor = x
             x_t: Tensor = t * x + (1 - t) * e
-            v_t: Tensor = (x_g - x_t) / (1 - t).clamp_min(0.05)
+            v_t: Tensor = x_g - x_t
 
         with self.accelerator.accumulate(self.model):
             # Perform x-pred and compute v-loss
             x_p: Tensor = self.model.forward(x=x_t, t=t, c=c)
-            v_p: Tensor = (x_p - x_t) / (1 - t).clamp_min(0.05)
+            v_p: Tensor = x_p - x_t
             v_m: Tensor = F.mse_loss(v_p, v_t)
 
             # Compute v-cfm
