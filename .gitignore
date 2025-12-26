@@ -1,4 +1,5 @@
 # Project ignored files
+scripts/
 wandb/
 logs/
 data/
