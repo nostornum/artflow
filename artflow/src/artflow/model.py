@@ -10,6 +10,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from torch import Tensor
+from torch.distributed import broadcast
+from torch.distributed import is_initialized as dist_init
 from torch.nn.functional import scaled_dot_product_attention as attention
 
 
@@ -78,7 +80,7 @@ class SPRINTRouter(nn.Module):
 
     def __init__(self, *, n: int, k: int, dim: int, depth_init: int = 2, depth_term: int = 10) -> None:
         super().__init__()
-        self.projection = nn.Linear(2 * dim, dim, bias=False)
+        self.projection = nn.Linear(2 * dim, dim, bias=True)
         self.mask_token = nn.Parameter(torch.zeros(dim))
         self.rate: float = min(1, max(0, 1 - k / n**2))
         self.depth_init: int = depth_init
@@ -594,18 +596,28 @@ class DeCo(nn.Module):
                 x_s: Tensor = self.router.drop(x=x_s, m=x_m)
                 x_r: Tensor = x_r.expand(B, -1, -1).gather(dim=1, index=x_m.unsqueeze(-1).expand(-1, -1, x_r.size(-1))).unsqueeze(1)
 
-            # Perform DiT layer for condition
+            # Perform DiT layer
             if not self.router.skip(i=i):
                 x_s: Tensor = layer(x=x_s, c=c_s, t=t_c, r=x_r)
 
             # Fuse sparse-deep & deep-shallow branches
             if i == self.router.depth_term:
                 # Path-Drop Learning: mask random image tokens
-                if self.training and torch.rand(1, device=x.device).item() < self.path_drop:
-                    x_s: Tensor = x_s * 0.0 + self.router.mask_token.expand_as(x_s)
+                if self.training:
+                    # Random choice to drop tokens
+                    drop_path: Tensor = torch.rand(1, device=x.device)
+
+                    # Sync decision across ranks
+                    if dist_init():
+                        broadcast(drop_path, src=0)
+
+                    # Keep grad flow but drop image tokens
+                    if drop_path.item() < self.path_drop:
+                        x_s: Tensor = x_s * 0.0 + self.router.mask_token.expand_as(x_s)
 
                 # Path-Drop Guidance: mask sparse-deep branch
-                x_s: Tensor = self.router.mask_token.expand(B, x_s.size(1), -1) if self.router.rate == 1 else x_s
+                if self.router.rate == 1:
+                    x_s: Tensor = x_s * 0.0 + self.router.mask_token.expand_as(x_s)
 
                 # Fuse sd and ds branches along with text tokens
                 x_s: Tensor = self.router.fuse(x=x_s, m=x_m, x_k=x_k)

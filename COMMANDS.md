@@ -1,7 +1,7 @@
 accelerate launch artflow/src/artflow                 \
- --seed 169                                           \
+ --seed 171                                           \
  --track.ckpt-every 500                               \
- --track.eval-every 500                               \
+ --track.eval-every 1000                              \
  --track.loss-every 10                                \
  --track.path logs                                    \
  --dataset.path data/danbooru                         \
@@ -14,7 +14,7 @@ accelerate launch artflow/src/artflow                 \
  --model.router_k 1                                   \
  --model.router_n 2                                   \
  --train.grad-accumulation-steps 1                    \
- --train.ckpt-resume checkpoint_203500.pth            \
+ --train.ckpt-resume checkpoint_208500.pth            \
  --train.ckpt-folder ckpt                             \
  --train.optim.lr 1e-4                                \
  --train.batch-size 56                                \
