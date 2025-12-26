@@ -53,8 +53,11 @@ class VAEArgs(Struct, kw_only=True):
     # Checkpoint from Huggingface
     ckpt: str = "black-forest-labs/FLUX.2-dev"
 
-    # Latent scaling factor
-    scaling_factor: float = 1 / 1.75
+    # Latent scale factor
+    scale_factor: float = 1.7552
+
+    # Latent shift factor
+    shift_factor: float = 0.0645
 
     # Multipass encode/decode
     batch: int = 16

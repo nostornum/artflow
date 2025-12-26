@@ -56,12 +56,15 @@ class Trainer:
 
     def imgs_encode(self, image: Tensor) -> Tensor:
         latents = [cast(Any, self.vae.encode(x)).latent_dist.sample() for x in image.split(self.args.vae.batch)]
-        return torch.cat(latents, dim=0) * self.args.vae.scaling_factor
+        latents = torch.cat(latents, dim=0)
+        latents = (latents - self.args.vae.shift_factor) / self.args.vae.scale_factor
+        return latents
 
     def imgs_decode(self, latent: Tensor) -> Tensor:
-        latent = latent / self.args.vae.scaling_factor
+        latent = latent * self.args.vae.scale_factor + self.args.vae.shift_factor
         images = [cast(Any, self.vae.decode(cast(FloatTensor, x))).sample for x in latent.split(self.args.vae.batch)]
-        return torch.cat(images, dim=0)
+        images = torch.cat(images, dim=0)
+        return images
 
     def shift_time(self, x: Tensor, t: Tensor) -> Tensor:
         m: int = prod(x.shape[1:])
@@ -84,8 +87,8 @@ class Trainer:
             e: Tensor = torch.randn_like(x)
 
             # Logit normal sampling for time then shift
-            t: Tensor = torch.randn(size=[B, 1, 1, 1], device=self.accelerator.device).sigmoid()
-            t: Tensor = self.shift_time(x, t)
+            z: Tensor = torch.randn(size=[B, 1, 1, 1], device=self.accelerator.device)
+            t: Tensor = (z * math.log(4.63) + 0).sigmoid()
 
             # Compute target
             x_g: Tensor = x
