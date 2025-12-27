@@ -112,7 +112,7 @@ class SPRINTRouter(nn.Module):
         ids_keep = torch.arange(S, device=x.device).expand(B, -1)
         ids_keep = cast(Tensor, einx.rearrange("b ((h_n h_g) (w_m w_g)) -> b (h_n w_m) (h_g w_g)", ids_keep, h_n=N, h_g=H_G, w_m=M, w_g=W_G))
         ids_keep = torch.gather(ids_keep, dim=-1, index=mask)
-        ids_keep = ids_keep.flatten(1).sort(dim=-1).values
+        ids_keep = ids_keep.flatten(1)
         return ids_keep
 
     def drop(self, *, x: Tensor, m: Tensor) -> Tensor:
