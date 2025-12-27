@@ -67,7 +67,7 @@ class RandomBucketSampler(Sampler[List[int]]):
     def __iter__(self) -> Iterator[List[int]]:
         for _ in range(self.num_samples):
             i_bkt: Tensor = torch.multinomial(self._w_bkt, num_samples=1, generator=self._rng)
-            b_idx: Tensor = self._b_idx[int(i_bkt)]
+            b_idx: Tensor = self._b_idx[self._bkt["bucket"][int(i_bkt)]]
             s_idx: Tensor = torch.randint(0, b_idx.nelement(), [self.batch_size], generator=self._rng)
             s_idx: Tensor = b_idx[s_idx]
             yield s_idx.tolist()
