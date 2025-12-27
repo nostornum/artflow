@@ -1,5 +1,5 @@
 accelerate launch artflow/src/artflow                 \
- --seed 189                                           \
+ --seed 192                                           \
  --track.ckpt-every 500                               \
  --track.eval-every 500                               \
  --track.loss-every 10                                \
@@ -14,12 +14,12 @@ accelerate launch artflow/src/artflow                 \
  --model.router_k 1                                   \
  --model.router_n 2                                   \
  --train.grad-accumulation-steps 1                    \
- --train.ckpt-resume checkpoint_247500.pth            \
+ --train.ckpt-resume checkpoint_257000.pth            \
  --train.ckpt-folder ckpt                             \
  --train.optim.lr 1e-4                                \
  --train.batch-size 56                                \
  --train.steps 500000                                 \
- --train.w-cfm 0.025                                  \
+ --train.w-cfm 0.01                                   \
  --sample.promptfile prompts.txt                      \
  --sample.timesteps 85                                \
  --sample.batch 56                                    \

@@ -5,6 +5,8 @@ from typing import Dict, Literal, Tuple, cast
 
 import einops
 import einx
+import numpy as np
+import numpy.typing as npt
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -70,6 +72,37 @@ def apply_rotary_emb_cross(xq: torch.Tensor, xk: torch.Tensor, freq_cis: torch.T
     xq_out = torch.view_as_real(xq_ * freq_cis).flatten(3)
     xk_out = torch.view_as_real(xk_ * freq_cis).flatten(3)
     return xq_out.type_as(xq), xk_out.type_as(xk)
+
+
+def get_2d_sincos_pos_embed(embed_dim: int, grid_size: Tuple[int, int]) -> Tensor:
+    grid_h = np.arange(grid_size[0], dtype=np.float32)
+    grid_w = np.arange(grid_size[1], dtype=np.float32)
+    grid = np.meshgrid(grid_w, grid_h)  # here w goes first
+    grid = np.stack(grid, axis=0)
+    grid = grid.reshape([2, 1, grid_size[0], grid_size[1]])
+    pos_embed = get_2d_sincos_pos_embed_from_grid(embed_dim, grid)
+    return torch.from_numpy(pos_embed).float()
+
+
+def get_2d_sincos_pos_embed_from_grid(embed_dim: int, grid: npt.NDArray) -> npt.NDArray:
+    assert embed_dim % 2 == 0
+    emb_h = get_1d_sincos_pos_embed_from_grid(embed_dim // 2, grid[0])  # (H*W, D/2)
+    emb_w = get_1d_sincos_pos_embed_from_grid(embed_dim // 2, grid[1])  # (H*W, D/2)
+    emb = np.concatenate([emb_h, emb_w], axis=1)  # (H*W, D)
+    return emb
+
+
+def get_1d_sincos_pos_embed_from_grid(embed_dim: int, pos: npt.NDArray) -> npt.NDArray:
+    assert embed_dim % 2 == 0
+    omega = np.arange(embed_dim // 2, dtype=np.float64)
+    omega /= embed_dim / 2.0
+    omega = 1.0 / 10000**omega  # (D/2,)
+    pos = pos.reshape(-1)  # (M,)
+    out = np.einsum("m,d->md", pos, omega)  # (M, D/2), outer product
+    emb_sin = np.sin(out)  # (M, D/2)
+    emb_cos = np.cos(out)  # (M, D/2)
+    emb = np.concatenate([emb_sin, emb_cos], axis=1)  # (M, D)
+    return emb
 
 
 class SPRINTRouter(nn.Module):
@@ -542,11 +575,15 @@ class DeCo(nn.Module):
         # Initialize decoder head
         self.decoder.init_weights()
 
-        # Persist RoPE2d tensors
-        self.posdict: Dict[Tuple[int, int], Tensor] = dict()
+        # Persist RoPE & APE tensors
+        self.dict_rope: Dict[Tuple[int, int], Tensor] = dict()
+        self.dict_pose: Dict[Tuple[int, int], Tensor] = dict()
 
-    def fetch_pos(self, h: int, w: int, device: torch.device) -> Tensor:
-        return self.posdict.setdefault((h, w), precompute_freqs_cis_2d(self.dim_head_e, h, w)).to(device) if (h, w) not in self.posdict else self.posdict[(h, w)].to(device)
+    def fetch_rope(self, *, h: int, w: int, d: torch.device) -> Tensor:
+        return self.dict_rope.setdefault((h, w), precompute_freqs_cis_2d(self.dim_head_e, h, w)).to(d) if (h, w) not in self.dict_rope else self.dict_rope[(h, w)].to(d)
+
+    def fetch_pose(self, *, h: int, w: int, d: torch.device) -> Tensor:
+        return self.dict_pose.setdefault((h, w), get_2d_sincos_pos_embed(self.dim_hidden, (h, w))).to(d) if (h, w) not in self.dict_pose else self.dict_pose[(h, w)].to(d)
 
     def forward(self, x: Tensor, t: Tensor, c: Tensor) -> Tensor:
         B, C, H, W = x.size()
@@ -579,8 +616,10 @@ class DeCo(nn.Module):
         c_s = F.silu(c_s)
 
         # Embed patches for encoder
-        x_r: Tensor = self.fetch_pos(E_Y, E_X, x.device)
+        x_r: Tensor = self.fetch_rope(h=E_Y, w=E_X, d=x.device)
+        x_p: Tensor = self.fetch_pose(h=E_Y, w=E_X, d=x.device)
         x_s: Tensor = self.p_embedder(x)
+        x_s: Tensor = x_s + x_p
 
         # Router state
         x_m: Tensor = torch.empty(size=[0])
